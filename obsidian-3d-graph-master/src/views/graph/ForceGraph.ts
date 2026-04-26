@@ -53,6 +53,28 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
   // stellium: live map of node path → star sprite handle for animation & disposal
   public readonly starSprites = new Map<string, StarSpriteHandle>();
 
+  // frustum culling — shared across all label onAfterRender callbacks, updated once per frame
+  private _frustum = new THREE.Frustum();
+  private _projScreenMatrix = new THREE.Matrix4();
+  private _lastFrustumTime = 0;
+
+  // P3: GPU instanced mesh for default (non-stellium) sphere nodes
+  private _instancedMesh: THREE.InstancedMesh | null = null;
+  private _nodeInstanceIndex = new Map<string, number>();
+  private _dummy = new THREE.Object3D();
+  private _instanceColor = new THREE.Color();
+
+  // Dev overlay
+  private _devOverlay: HTMLDivElement | null = null;
+  private _devFrameCount = 0;
+  private _devLastTime = 0;
+  private _devFps = 0;
+  private _devLabelCulled = 0;
+  private _devLabelTotal = 0;
+
+  // Global frame counter (never resets — used for frame-skip logic)
+  private _globalFrame = 0;
+
   /**
    *
    * this will create a new force graph instance and render it to the view
@@ -220,6 +242,17 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
     this.myCube = this.createCube();
     scene.add(this.myCube);
 
+    // P3: build instanced mesh before nodeThreeObject runs (non-stellium mode only)
+    const initSettings = this.view.settingManager.getCurrentSetting();
+    if (!initSettings.display.stelliumMode) {
+      this._buildInstancedMesh(graph, scene);
+    }
+
+    // Dev overlay
+    if (initSettings.display.devMode) {
+      this._createDevOverlay();
+    }
+
     // add node label + optional star sprite
     this.instance
       .nodeThreeObject((node: Node) => {
@@ -241,20 +274,69 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
 
         const cssObject = new CSS2DObject(nodeEl);
         cssObject.onAfterRender = () => {
+          const camera = this.instance.camera() as THREE.PerspectiveCamera;
+
+          // Update frustum at most once per frame (all nodes share the same frustum instance)
+          const frameKey = Math.floor(performance.now() / 16);
+          if (frameKey !== this._lastFrustumTime) {
+            this._projScreenMatrix.multiplyMatrices(
+              camera.projectionMatrix,
+              camera.matrixWorldInverse
+            );
+            this._frustum.setFromProjectionMatrix(this._projScreenMatrix);
+            this._lastFrustumTime = frameKey;
+          }
+
+          // @ts-ignore
+          const obj = node.__threeObj as THREE.Object3D | undefined;
+          const pos = obj?.position;
+
+          if (pos) {
+            const cullDist =
+              this.view.settingManager.getCurrentSetting().display.labelCullDistance ?? 800;
+            if (!this._frustum.containsPoint(pos) || camera.position.distanceTo(pos) > cullDist) {
+              this._devLabelCulled++;
+              this._devLabelTotal++;
+              nodeEl.style.display = "none";
+              return;
+            }
+          }
+
+          nodeEl.style.display = "";
           const value = 1 - this.interactionManager.getNodeOpacityEasedValue(node);
-          nodeEl.style.opacity = `${
+          const opacity =
             this.interactionManager.getIsAnyHighlighted() &&
             !this.interactionManager.isHighlightedNode(node)
               ? Math.clamp(value, 0, 0.2)
               : this.interactionManager.hoveredNode === node
               ? 1
-              : value
-          }`;
+              : value;
+
+          // opacity near-zero → remove from DOM paint pipeline entirely
+          if (opacity < 0.01) {
+            this._devLabelCulled++;
+            this._devLabelTotal++;
+            nodeEl.style.display = "none";
+            return;
+          }
+          this._devLabelTotal++;
+          nodeEl.style.opacity = `${opacity}`;
         };
         node.labelEl = nodeEl;
 
         if (!settings.display.stelliumMode) {
-          return cssObject;
+          // P3: invisible proxy sphere for raycasting + label (InstancedMesh handles visual rendering)
+          const val = Math.max(1, Math.log2(node.links.length + 2)) * 3;
+          const proxySphere = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 8, 6),
+            new THREE.MeshBasicMaterial()
+          );
+          proxySphere.scale.setScalar(Math.cbrt(val) * 4);
+          proxySphere.visible = false;
+          const proxyGroup = new THREE.Group();
+          proxyGroup.add(proxySphere);
+          proxyGroup.add(cssObject);
+          return proxyGroup;
         }
 
         // ── Stellium star sprite (replaces the default sphere) ───────────────
@@ -279,8 +361,8 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
 
         return handle.sprite;
       })
-      // stelliumMode=true → replace default sphere; false → extend it
-      .nodeThreeObjectExtend(!this.view.settingManager.getCurrentSetting().display.stelliumMode);
+      // always replace default sphere: either star sprite (stellium) or proxy+InstancedMesh (default)
+      .nodeThreeObjectExtend(false);
 
     // init other setting
     this.updateConfig(this.view.settingManager.getCurrentSetting());
@@ -328,6 +410,24 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
     this.instance.scene().onBeforeRender = (renderer, scene, camera, geometry, material, group) => {
       oldOnBeforeRender(renderer, scene, camera, geometry, material, group);
 
+      // Dev overlay: read previous frame's counters, then reset for this frame
+      const devSettings = this.view.settingManager.getCurrentSetting().display;
+      if (devSettings.devMode) {
+        if (!this._devOverlay) this._createDevOverlay();
+        this._devFrameCount++;
+        const now = performance.now();
+        if (now - this._devLastTime >= 500) {
+          this._devFps = Math.round(this._devFrameCount / (now - this._devLastTime) * 1000);
+          this._devFrameCount = 0;
+          this._devLastTime = now;
+          this._updateDevOverlayContent();
+        }
+        this._devLabelCulled = 0;
+        this._devLabelTotal = 0;
+      } else if (this._devOverlay) {
+        this._destroyDevOverlay();
+      }
+
       const cwd = new THREE.Vector3();
       camera.getWorldDirection(cwd);
       cwd.multiplyScalar(FOCAL_FROM_CAMERA);
@@ -335,8 +435,14 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
       myCube.position.set(cwd.x, cwd.y, cwd.z);
       myCube.setRotationFromQuaternion(camera.quaternion);
 
-      // stellium: animate star sprites every frame
+      // P3: update instanced mesh positions + colors every frame
+      if (this._instancedMesh) {
+        this._updateInstancedMesh();
+      }
+
+      // stellium: animate star sprites every frame (with frame-skip + distance LOD)
       if (this.starSprites.size > 0) {
+        this._globalFrame++;
         const d = this.view.settingManager.getCurrentSetting().display;
         const colors = {
           coreColor: d.starCoreColor ?? "#ffffff",
@@ -350,16 +456,32 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
         };
         const directColor   = d.nodeHoverColor ?? "#ff6633";
         const neighborColor = d.nodeHoverNeighbourColor ?? "#00ff00";
+        const cullDist = d.labelCullDistance ?? 800;
+        const camPos = (camera as THREE.PerspectiveCamera).position;
+        // skip aurora canvas redraw on odd frames (keeps animation smooth, halves GPU uploads)
+        const skipDraw = this._globalFrame % 2 === 1;
+
         this.starSprites.forEach((handle, path) => {
           const node = this.instance.graphData().getNodeByPath(path);
           if (!node) return;
+
+          // LOD: hide sprites beyond cull distance and skip all updates
+          const dist = camPos.distanceTo(handle.sprite.position);
+          if (dist > cullDist) {
+            handle.sprite.visible = false;
+            return;
+          }
+          handle.sprite.visible = true;
+
           const isDirect   = this.interactionManager.hoveredNode === node;
           const isNeighbor = !isDirect && this.interactionManager.isHighlightedNode(node);
+          // never skip draw for hovered nodes — their aurora must stay perfectly in sync
           handle.update(
             this.interactionManager.isAuroraNode(node),
             colors,
             isDirect || isNeighbor,
             isDirect ? directColor : neighborColor,
+            skipDraw && !isDirect,
           );
         });
       }
@@ -377,6 +499,91 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
     (this.myCube.material as THREE.Material).dispose();
     this.starSprites.forEach((handle) => handle.dispose());
     this.starSprites.clear();
+    if (this._instancedMesh) {
+      this.instance.scene().remove(this._instancedMesh);
+      this._instancedMesh.geometry.dispose();
+      (this._instancedMesh.material as THREE.Material).dispose();
+      this._instancedMesh = null;
+      this._nodeInstanceIndex.clear();
+    }
+    this._destroyDevOverlay();
+  }
+
+  private _buildInstancedMesh(graph: Graph, scene: THREE.Scene) {
+    const count = graph.nodes.length;
+    if (count === 0) return;
+    const geo = new THREE.SphereGeometry(1, 16, 12);
+    const mat = new THREE.MeshBasicMaterial({ opacity: 0.9, transparent: true });
+    this._instancedMesh = new THREE.InstancedMesh(geo, mat, count);
+    this._instancedMesh.frustumCulled = false;
+    graph.nodes.forEach((node, i) => {
+      this._nodeInstanceIndex.set(node.id, i);
+      this._instanceColor.set(0x888888);
+      this._instancedMesh!.setColorAt(i, this._instanceColor);
+    });
+    scene.add(this._instancedMesh);
+  }
+
+  private _updateInstancedMesh() {
+    const mesh = this._instancedMesh!;
+    const nodes = this.instance.graphData().nodes as (Node & { x?: number; y?: number; z?: number })[];
+    const currentPath = "currentFile" in this.view ? (this.view.currentFile as TFile)?.path : null;
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const val = Math.max(1, Math.log2(node.links.length + 2)) * 3 * (node.path === currentPath ? 2.5 : 1);
+      this._dummy.position.set(node.x ?? 0, node.y ?? 0, node.z ?? 0);
+      this._dummy.scale.setScalar(Math.cbrt(val) * 4);
+      this._dummy.updateMatrix();
+      mesh.setMatrixAt(i, this._dummy.matrix);
+      this._instanceColor.set(this.interactionManager.getNodeColor(node));
+      mesh.setColorAt(i, this._instanceColor);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
+
+  private _createDevOverlay() {
+    if (this._devOverlay) return;
+    const overlay = document.createElement("div");
+    overlay.style.cssText = [
+      "position:absolute", "top:8px", "left:8px", "z-index:100",
+      "background:rgba(0,0,0,0.7)", "color:#00ff99",
+      "font-family:monospace", "font-size:11px", "line-height:1.7",
+      "padding:6px 12px", "border-radius:6px",
+      "border:1px solid rgba(0,255,153,0.25)",
+      "pointer-events:none", "user-select:none",
+    ].join(";");
+    this.view.contentEl.style.position = "relative";
+    this.view.contentEl.appendChild(overlay);
+    this._devOverlay = overlay;
+    this._devLastTime = performance.now();
+  }
+
+  private _destroyDevOverlay() {
+    this._devOverlay?.remove();
+    this._devOverlay = null;
+  }
+
+  private _updateDevOverlayContent() {
+    if (!this._devOverlay) return;
+    const totalNodes = this.instance.graphData().nodes.length;
+    const culled = this._devLabelCulled;
+    const total = this._devLabelTotal;
+    const visible = total - culled;
+    const stellium = this.view.settingManager.getCurrentSetting().display.stelliumMode;
+    const instanced = this._instancedMesh
+      ? `✓ ${totalNodes} instances / 1 draw call`
+      : stellium
+        ? `✗ (star nodes mode uses sprites)`
+        : totalNodes === 0
+          ? `✗ (no nodes)`
+          : `✗ (building...)`;
+    this._devOverlay.innerHTML =
+      `FPS: <b>${this._devFps}</b><br>` +
+      `Total nodes: ${totalNodes}<br>` +
+      `Labels visible: ${visible} / ${total}<br>` +
+      `Labels culled: ${culled}<br>` +
+      `GPU instancing: ${instanced}`;
   }
 
   /**

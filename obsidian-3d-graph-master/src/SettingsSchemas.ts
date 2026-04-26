@@ -40,6 +40,15 @@ export const distanceFromFocal = {
   default: 300,
 };
 
+export const labelCullDistance = {
+  min: 200,
+  max: 2000,
+  step: 50,
+  default: 800,
+};
+
+export const DEV_MODE_DEFAULT = false;
+
 export enum GraphType {
   /**
    * the global graph
@@ -82,6 +91,8 @@ const commonSetting = {
     linkDistance: linkDistance.default,
     nodeRepulsion: nodeRepulsion.default,
     distanceFromFocal: 300,
+    labelCullDistance: 800,
+    devMode: false,
     // node hover color is red
     nodeHoverColor: "#ff0000",
     // node hover neighbour color is green
@@ -118,6 +129,8 @@ export const BaseDisplaySettingsSchema = z.object({
   linkDistance: z.number().default(commonSetting.display.linkDistance),
   nodeRepulsion: z.number().default(commonSetting.display.nodeRepulsion),
   distanceFromFocal: z.number().default(commonSetting.display.distanceFromFocal),
+  labelCullDistance: z.number().default(commonSetting.display.labelCullDistance),
+  devMode: z.boolean().default(false),
   nodeHoverColor: z.string().default(commonSetting.display.nodeHoverColor),
   nodeHoverNeighbourColor: z.string().default(commonSetting.display.nodeHoverNeighbourColor),
   linkHoverColor: z.string().default(commonSetting.display.linkHoverColor),

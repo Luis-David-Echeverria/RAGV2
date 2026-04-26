@@ -1,6 +1,6 @@
 import * as THREE from "three";
 
-const CANVAS_SIZE = 256;
+const CANVAS_SIZE = 128;
 
 const phaseCache = new Map<string, number>();
 function getPhase(nodeId: string): number {
@@ -101,7 +101,7 @@ function drawStarCanvas(
 
 export interface StarSpriteHandle {
   sprite: THREE.Sprite;
-  update(isAurora: boolean, colors: StelliiumColors, hovered?: boolean, hoverColor?: string): void;
+  update(isAurora: boolean, colors: StelliiumColors, hovered?: boolean, hoverColor?: string, skipDraw?: boolean): void;
   dispose(): void;
 }
 
@@ -132,13 +132,15 @@ export function createStarSprite(
 
   const handle: StarSpriteHandle = {
     sprite,
-    update(aurora: boolean, c: StelliiumColors, hovered = false, hoverColor = "#ff6633") {
+    update(aurora: boolean, c: StelliiumColors, hovered = false, hoverColor = "#ff6633", skipDraw = false) {
       const t = Date.now() * 0.0018 + phase;
       const nodeScale = Math.max(6, Math.log2(degree + 2) * 5) * c.sizeMultiplier;
 
       if (aurora) {
-        drawStarCanvas(canvas, true, t, c);
-        texture.needsUpdate = true;
+        if (!skipDraw) {
+          drawStarCanvas(canvas, true, t, c);
+          texture.needsUpdate = true;
+        }
         const pulse = 1.0 + 0.20 * Math.sin(t * 0.75);
         const s = nodeScale * c.auroraSizeMultiplier * pulse * (hovered ? 1.25 : 1);
         sprite.scale.set(s, s, 1);

@@ -10,6 +10,7 @@ import type {
 import {
   DagOrientation,
   distanceFromFocal,
+  labelCullDistance,
   linkDistance,
   linkThickness,
   nodeRepulsion,
@@ -98,6 +99,34 @@ export const DisplaySettingsView = (
     (value) => {
       settingManager.updateCurrentSettings((setting) => {
         setting.value.display.distanceFromFocal = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    {
+      name: "Label visibility distance",
+      value: displaySettings.labelCullDistance ?? labelCullDistance.default,
+      stepOptions: labelCullDistance,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.labelCullDistance = value;
+      });
+    }
+  );
+
+  addToggle(
+    containerEl,
+    {
+      name: "Dev mode",
+      description: "Show FPS, node count, and label culling stats overlay.",
+      value: displaySettings.devMode ?? false,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.devMode = value;
       });
     }
   );
