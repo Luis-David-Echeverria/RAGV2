@@ -1,0 +1,8 @@
+{
+	"id": "stellium-graph",
+	"name": "Stellium Graph",
+	"version": "1.0.0",
+	"description": "3D knowledge graph with star nodes and aurora borealis RAG highlighting",
+	"author": "Stellium",
+	"isDesktopOnly": true
+}

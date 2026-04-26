@@ -1,0 +1,38 @@
+# Entity alias dictionary — edit freely
+# Format: "alias": "canonical name"
+# Applied via whole-word replacement BEFORE text reaches LightRAG.
+
+ML: Machine Learning
+DL: Deep Learning
+NLP: Natural Language Processing
+LLM: Large Language Model
+LLMs: Large Language Models
+RL: Reinforcement Learning
+CV: Computer Vision
+GAN: Generative Adversarial Network
+VAE: Variational Autoencoder
+CNN: Convolutional Neural Network
+RNN: Recurrent Neural Network
+LSTM: Long Short-Term Memory
+NNs: Neural Networks
+NN: Neural Network
+AI: Artificial Intelligence
+AGI: Artificial General Intelligence
+
+JS: JavaScript
+TS: TypeScript
+PY: Python
+k8s: Kubernetes
+K8s: Kubernetes
+tf: TensorFlow
+TF: TensorFlow
+PT: PyTorch
+HF: Hugging Face
+OAI: OpenAI
+GCP: Google Cloud Platform
+AWS: Amazon Web Services
+DB: Database
+API: Application Programming Interface
+REST: Representational State Transfer
+RAG: Retrieval-Augmented Generation
+KG: Knowledge Graph

@@ -1,0 +1,105 @@
+# Eval set — Panel Solar X200 / RAG Test
+# Documento fuente: Vault/processed/user/RAG Test.md
+#
+# Tipos de caso:
+#   factual   — valor exacto del documento; F1 alto esperado
+#   procedural — pasos o secuencia; F1 medio-alto
+#   code      — detalles del script Python
+#   relational — conexiones entre entidades del grafo
+#   boundary  — info que NO está en el documento; respuesta esperada: no sé / no hay datos
+#
+# Métrica principal: F1 lexical (solapamiento de tokens con 'expected').
+# Entity coverage mide qué fracción de los nodos devueltos aparecen en el resumen.
+
+cases:
+
+  # ── Factual (valores exactos) ────────────────────────────────────────────────
+
+  - question: "¿Cuál es la potencia máxima del Panel Solar X200?"
+    expected: >
+      La potencia máxima del Panel Solar X200 es 450 Wp, medida bajo
+      condiciones de prueba estándar (STC): 1000 W/m², 25°C y AM 1.5.
+
+  - question: "¿Qué eficiencia tiene el módulo Panel Solar X200?"
+    expected: >
+      El módulo Panel Solar X200 tiene una eficiencia del 21.5%.
+
+  - question: "¿Cuántos años de garantía de rendimiento tiene el Panel Solar X200 y a qué porcentaje?"
+    expected: >
+      El Panel Solar X200 tiene garantía de rendimiento del 85% a 25 años.
+
+  - question: "¿Cuál es el coeficiente de temperatura de Pmax del panel?"
+    expected: >
+      El coeficiente de temperatura de Pmax es -0.35 %/°C, lo que significa
+      que la potencia disminuye un 0.35% por cada grado Celsius que sube la temperatura.
+
+  - question: "¿Cuál es el voltaje de circuito abierto (Voc) y la corriente de cortocircuito (Isc) del panel?"
+    expected: >
+      El voltaje de circuito abierto (Voc) es 49.8 V y la corriente de
+      cortocircuito (Isc) es 11.2 A.
+
+  # ── Procedural (instalación) ─────────────────────────────────────────────────
+
+  - question: "¿Qué tipo de cable se usa para el cableado DC y qué protección lleva?"
+    expected: >
+      Se utiliza cable solar PV1-F de 6mm² para el cableado DC, protegido
+      con fusibles de 15A por string.
+
+  - question: "¿Qué resistencia debe tener la puesta a tierra del sistema solar?"
+    expected: >
+      La resistencia de la puesta a tierra debe ser menor a 10 ohmios.
+      Se unen todos los marcos de los paneles a la barra de tierra principal.
+
+  - question: "¿Cuál es el primer paso del procedimiento de instalación?"
+    expected: >
+      El primer paso es el análisis del sitio: evaluar sombras, orientación
+      e inclinación óptima, que debe ser la latitud del lugar más o menos 10 grados.
+
+  - question: "¿Qué tipo de inversor se conecta al sistema y qué características tiene?"
+    expected: >
+      Se conecta un inversor híbrido de 5kW con seguimiento MPPT dual.
+
+  - question: "¿Cada cuánto se colocan los rieles de aluminio en la estructura de montaje?"
+    expected: >
+      Los rieles de aluminio anodizado se colocan cada 1.2 metros.
+
+  # ── Code (script Python) ──────────────────────────────────────────────────────
+
+  - question: "¿Qué hace la función energia_diaria y cuáles son sus parámetros?"
+    expected: >
+      La función energia_diaria calcula la energía generada en kWh.
+      Recibe tres parámetros: potencia_pico (kWp instalados),
+      horas_sol_pico (HSP del lugar) y eficiencia_sistema con valor
+      por defecto de 0.85. Multiplica los tres valores entre sí.
+
+  - question: "¿Cuál es la producción diaria estimada para un panel de 450W con 5.2 horas sol pico?"
+    expected: >
+      Usando la función energia_diaria con 0.45 kWp y 5.2 HSP y
+      eficiencia 0.85, la producción diaria estimada es
+      0.45 × 5.2 × 0.85 = 1.9890 kWh, aproximadamente 1.99 kWh.
+
+  # ── Relational (conexiones en el grafo) ───────────────────────────────────────
+
+  - question: "¿Qué relación existe entre el Panel Solar X200 y las Condiciones de Prueba Estándar (STC)?"
+    expected: >
+      Las especificaciones del Panel Solar X200 (potencia, eficiencia,
+      voltaje y corriente) se miden bajo las Condiciones de Prueba
+      Estándar (STC): 1000 W/m², 25°C y AM 1.5.
+
+  - question: "¿Cómo se relacionan el seguimiento MPPT dual y el inversor híbrido?"
+    expected: >
+      El seguimiento MPPT dual es una característica del inversor híbrido
+      de 5kW. MPPT (Maximum Power Point Tracking) optimiza la extracción
+      de energía de cada string de paneles conectado al inversor.
+
+  # ── Boundary (fuera del documento) ────────────────────────────────────────────
+
+  - question: "¿Cuánto cuesta el Panel Solar X200?"
+    expected: >
+      El documento no contiene información sobre el precio del panel.
+      No hay datos de costo disponibles en la base de conocimiento.
+
+  - question: "¿Qué marca fabrica el Panel Solar X200?"
+    expected: >
+      El documento no especifica el fabricante del Panel Solar X200.
+      No hay datos del fabricante en la base de conocimiento.
