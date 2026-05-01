@@ -64,8 +64,14 @@ _meta/orphaned/
 .vscode/
 .idea/
 *.iml
+*.code-workspace
 .DS_Store
 Thumbs.db
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal docs / planning notes (kept locally, change too fast for a public repo)
+# ─────────────────────────────────────────────────────────────────────────────
+docs/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Local Claude Code state
