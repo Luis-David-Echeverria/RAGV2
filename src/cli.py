@@ -244,6 +244,13 @@ def status():
 
 
 @cli.command()
+def tray():
+    """Launch the Stellium system-tray app (PySide6)."""
+    from .desktop.tray import main as tray_main
+    raise SystemExit(tray_main())
+
+
+@cli.command()
 @click.option("--hard", is_flag=True, help="También borra LightRAG storage (re-indexa todo desde cero).")
 def reset(hard):
     """Mueve processed/ de vuelta a inbox/ y limpia sync_state.db."""

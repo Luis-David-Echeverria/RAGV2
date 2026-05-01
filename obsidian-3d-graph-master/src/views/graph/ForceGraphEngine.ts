@@ -4,19 +4,13 @@ import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls";
 import type { Node } from "@/graph/Node";
 import type { BaseForceGraph } from "@/views/graph/ForceGraph";
 import type { Link } from "@/graph/Link";
-import { CommandModal } from "@/commands/CommandModal";
-import { CommandClickNodeAction, GraphType } from "@/SettingsSchemas";
 import { createNotice } from "@/util/createNotice";
 import { hexToRGBA } from "@/util/hexToRGBA";
 import type { TFile } from "obsidian";
 
 const origin = new THREE.Vector3(0, 0, 0);
 const cameraLookAtCenterTransitionDuration = 1000;
-const LINK_PARTICLE_MULTIPLIER = 2;
 export const FOCAL_FROM_CAMERA = 400;
-const selectedColor = "#CCA700";
-const PARTICLE_FREQUECY = 4;
-const LINK_ARROW_WIDTH_MULTIPLIER = 5;
 
 /**
  * this instance handle all the interaction. In other words, the interaction manager
@@ -29,13 +23,24 @@ export class ForceGraphEngine {
   private commandDown = false;
   private selectedNodes = new Set<Node>();
   /**
-   * the node connected to the hover node
+   * Nodes currently revealed in the focus animation (the focus node + emitter
+   * sources whose traces are originating from them). Outgoing destinations
+   * are NOT here until their incoming trace finishes and onTraceArrived fires.
    */
   public readonly highlightedNodes: Set<string> = new Set();
   /**
    * the links connected to the hover node
    */
   public readonly highlightedLinks: Set<Link> = new Set();
+  /**
+   * Outgoing destinations awaiting trace arrival before they reveal.
+   */
+  public readonly pendingDestinations: Set<string> = new Set();
+  /**
+   * Node id → start time (ms) for an active arrival pulse. Read by the
+   * star-sprite tick to scale the sprite briefly when an incoming trace lands.
+   */
+  public readonly pulseTriggers: Map<string, number> = new Map();
   hoveredNode: Node | null = null;
 
   // zooming
@@ -141,73 +146,67 @@ export class ForceGraphEngine {
     }
   };
 
+  // Right click semantics:
+  //  - on a pinned node → unpin only it (keeps others)
+  //  - on an unpinned node → replace selection with just it (or add if shift)
   onNodeRightClick = (node: Node & Coords, event: MouseEvent) => {
-    const plugin = this.forceGraph.view.plugin;
-    const pluginSetting = plugin.settingManager.getSettings().pluginSetting;
-    if (this.commandDown || event.ctrlKey) {
-      const clickedNodeFile = this.findFileByNode(node);
-      if (
-        pluginSetting.commandRightClickNode === CommandClickNodeAction.openNodeInNewTab &&
-        clickedNodeFile
-      ) {
-        // open file in new tab
-        this.openFileInNewTab(clickedNodeFile);
-      } else if (pluginSetting.commandRightClickNode === CommandClickNodeAction.focusNode)
-        this.focusOnCoords(node);
-      return;
-    }
-
-    // open context menu
-    if (!this.selectedNodes.has(node)) {
-      this.selectedNodes.clear();
+    if (this.selectedNodes.has(node)) {
+      this.selectedNodes.delete(node);
+    } else {
+      if (!event.shiftKey) this.selectedNodes.clear();
       this.selectedNodes.add(node);
     }
-    //   show a modal
-    const modal = new CommandModal(this.forceGraph.view, this.selectedNodes);
-    const promptEl = modal.containerEl.querySelector(".prompt");
-    const dv = promptEl?.createDiv({
-      text: `Commands will be run for ${this.selectedNodes.size} nodes.`,
-    });
-    dv?.setAttribute("style", "padding: var(--size-4-3); font-size: var(--font-smaller);");
-    modal.open();
+    this.rebuildHighlights();
+    this.updateColor();
   };
 
+  // Track double-click manually (3d-force-graph fires onNodeClick on every click; we delay to detect dbl)
+  private _lastClickNodeId: string | null = null;
+  private _lastClickTime = 0;
+  private _pendingClickTimer: Timer | undefined;
+
   onNodeClick = (node: Node & Coords, event: MouseEvent) => {
-    const plugin = this.forceGraph.view.plugin;
-    const pluginSetting = plugin.settingManager.getSettings().pluginSetting;
+    // Shift+left → multi-select (kept for power users)
     if (event.shiftKey) {
       const isSelected = this.selectedNodes.has(node);
-      // multi-selection
       isSelected ? this.selectedNodes.delete(node) : this.selectedNodes.add(node);
-      return;
-    }
-    const clickedNodeFile = this.findFileByNode(node);
-
-    if (this.commandDown || event.ctrlKey) {
-      if (
-        pluginSetting.commandLeftClickNode === CommandClickNodeAction.openNodeInNewTab &&
-        clickedNodeFile
-      ) {
-        // open file in new tab
-        this.openFileInNewTab(clickedNodeFile);
-      } else if (pluginSetting.commandLeftClickNode === CommandClickNodeAction.focusNode)
-        this.focusOnCoords(node);
+      this.rebuildHighlights();
+      this.updateColor();
       return;
     }
 
-    if (clickedNodeFile) {
-      if (this.forceGraph.view.graphType === GraphType.local) {
-        // open file in new tab
-        this.openFileInNewTab(clickedNodeFile);
-      } else {
-        // open file in current tab (active leaf)
-        this.forceGraph.view.itemView.leaf.openFile(clickedNodeFile);
+    const now = performance.now();
+    const isDouble =
+      this._lastClickNodeId === node.id && now - this._lastClickTime < 300;
+
+    if (isDouble) {
+      // Double left click → open in new tab
+      clearTimeout(this._pendingClickTimer);
+      this._pendingClickTimer = undefined;
+      this._lastClickNodeId = null;
+      const file = this.findFileByNode(node);
+      if (file) this.openFileInNewTab(file);
+      return;
+    }
+
+    // Single left click → focus camera (constellation view) + pin the node
+    this._lastClickNodeId = node.id;
+    this._lastClickTime = now;
+    clearTimeout(this._pendingClickTimer);
+    this._pendingClickTimer = setTimeout(() => {
+      this._pendingClickTimer = undefined;
+      this._lastClickNodeId = null;
+      this.focusOnConstellation(node);
+      if (!this.selectedNodes.has(node)) {
+        this.selectedNodes.add(node);
+        this.rebuildHighlights();
+        this.updateColor();
       }
-    }
+    }, 300);
   };
 
   onNodeHover = (node: Node | null) => {
-    if ((!node && !this.highlightedNodes.size) || (node && this.hoveredNode === node)) return;
+    if ((!node && !this.hoveredNode) || (node && this.hoveredNode === node)) return;
 
     // set node label text
     if (node) {
@@ -220,15 +219,8 @@ export class ForceGraphEngine {
       this.forceGraph.nodeLabelEl.style.opacity = "0";
     }
 
-    this.clearHighlights();
-
-    // add the new highlighted nodes and link
-    if (node) {
-      this.highlightedNodes.add(node.id);
-      node.neighbors.forEach((neighbor) => this.highlightedNodes.add(neighbor.id));
-      const nodeLinks = this.forceGraph.instance.graphData().getLinksWithNode(node.id);
-      if (nodeLinks) nodeLinks.forEach((link) => this.highlightedLinks.add(link));
-    }
+    this.hoveredNode = node ?? null;
+    this.rebuildHighlights();
 
     const shouldUseCommand =
       this.forceGraph.view.plugin.app.internalPlugins.getPluginById("page-preview").instance
@@ -240,16 +232,89 @@ export class ForceGraphEngine {
       this.forceGraph.view.eventBus.trigger("open-node-preview", node);
     }
 
-    this.hoveredNode = node ?? null;
     this.updateColor();
   };
 
-  /**
-   * when hover on node or link, they are highlighted. This function will clear the highlight
-   */
   private clearHighlights = () => {
+    this.highlightedLinks.forEach((l) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (l as any).__traceArrived = false;
+    });
     this.highlightedNodes.clear();
     this.highlightedLinks.clear();
+    this.pendingDestinations.clear();
+  };
+
+  /**
+   * Rebuilds the focus animation state. Emitter sources (incoming neighbours
+   * of the focus node + the focus node itself) are revealed at t=0; outgoing
+   * destinations are queued in pendingDestinations and only revealed once
+   * their incoming trace reaches them (see onTraceArrived).
+   */
+  public rebuildHighlights = () => {
+    // Reset arrival flags on previously highlighted links so they re-animate cleanly
+    this.highlightedLinks.forEach((l) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (l as any).__traceArrived = false;
+    });
+    this.highlightedNodes.clear();
+    this.highlightedLinks.clear();
+    this.pendingDestinations.clear();
+
+    const focusNodes: Node[] = [];
+    if (this.hoveredNode) focusNodes.push(this.hoveredNode);
+    this.selectedNodes.forEach((n) => focusNodes.push(n));
+    if (focusNodes.length === 0) return;
+
+    const focusIds = new Set(focusNodes.map((n) => n.id));
+
+    focusNodes.forEach((n) => {
+      this.highlightedNodes.add(n.id);
+      const links = this.forceGraph.instance.graphData().getLinksWithNode(n.id);
+      if (!links) return;
+      links.forEach((l) => {
+        this.highlightedLinks.add(l);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (l as any).__traceP = 0;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (l as any).__traceArrived = false;
+
+        if (l.target.id === n.id) {
+          // Incoming: source emits, focus pulses on arrival → emitter lights immediately
+          if (!focusIds.has(l.source.id)) this.highlightedNodes.add(l.source.id);
+        } else {
+          // Outgoing: focus emits → destination waits for trace arrival
+          if (!focusIds.has(l.target.id)) this.pendingDestinations.add(l.target.id);
+        }
+      });
+    });
+
+    // A node that's both an emitter (lit) and a pending destination stays lit.
+    this.highlightedNodes.forEach((id) => this.pendingDestinations.delete(id));
+  };
+
+  /**
+   * Called by linkPositionUpdate the frame a highlighted link's trace
+   * progress crosses 1. Reveals the destination (outgoing) or fires a pulse
+   * on the focus node (incoming). Idempotent via link.__traceArrived.
+   */
+  public onTraceArrived = (link: Link) => {
+    const focusIds = new Set<string>();
+    if (this.hoveredNode) focusIds.add(this.hoveredNode.id);
+    this.selectedNodes.forEach((n) => focusIds.add(n.id));
+    if (focusIds.size === 0) return;
+
+    let mutated = false;
+    if (focusIds.has(link.source.id) && !focusIds.has(link.target.id)) {
+      if (this.pendingDestinations.delete(link.target.id)) {
+        this.highlightedNodes.add(link.target.id);
+        mutated = true;
+      }
+    }
+    if (focusIds.has(link.target.id)) {
+      this.pulseTriggers.set(link.target.id, performance.now());
+    }
+    if (mutated) this.updateColor();
   };
 
   updateNodeLabelDiv() {
@@ -269,61 +334,46 @@ export class ForceGraphEngine {
 
   getLinkColor = (link: Link) => {
     const settings = this.forceGraph.view.settingManager.getCurrentSetting();
-    if (settings.display.linkStyle === "threads") {
-      const op = settings.display.threadOpacity ?? 0.22;
-      if (this.isAuroraLink(link))
-        return hexToRGBA(settings.display.auroraColor1 ?? "#00e8a0", Math.min(op * 2.5, 0.85));
-      if (this.isHighlightedLink(link)) return `rgba(255,255,255,${Math.min(op * 4, 0.95)})`;
-      return this.getIsAnyHighlighted()
-        ? `rgba(255,255,255,${(op * 0.3).toFixed(3)})`
-        : `rgba(255,255,255,${op.toFixed(3)})`;
+    const focusActive = this.getIsAnyHighlighted();
+    const isHighlighted = this.isHighlightedLink(link);
+    const isAurora = this.isAuroraLink(link);
+    const op = settings.display.threadOpacity ?? 0.22;
+    if (isAurora) {
+      const auroraAlpha =
+        focusActive && !isHighlighted
+          ? Math.min(op * 0.4, 0.12)
+          : Math.min(op * 2.5, 0.85);
+      return hexToRGBA(settings.display.auroraColor1 ?? "#00e8a0", auroraAlpha);
     }
-    const color = this.isHighlightedLink(link)
-      ? settings.display.linkHoverColor
-      : this.forceGraph.view.theme.graphLine;
-    return hexToRGBA(color, this.getIsAnyHighlighted() && !this.isHighlightedLink(link) ? 0.2 : 1);
+    if (isHighlighted) return `rgba(255,255,255,${Math.min(op * 4, 0.95)})`;
+    return focusActive
+      ? `rgba(255,255,255,${(op * 0.3).toFixed(3)})`
+      : `rgba(255,255,255,${op.toFixed(3)})`;
   };
 
   getLinkWidth = (link: Link) => {
-    const setting = this.forceGraph.view.settingManager.getCurrentSetting();
-    if (setting.display.linkStyle === "threads") {
-      if (this.isAuroraLink(link)) return 1.4;
-      return this.isHighlightedLink(link) ? 0.8 : 0.3;
-    }
-    return this.isHighlightedLink(link)
-      ? setting.display.linkThickness * 1.5
-      : setting.display.linkThickness;
+    if (this.isAuroraLink(link)) return 1.4;
+    return this.isHighlightedLink(link) ? 0.8 : 0.3;
   };
 
   getLinkDirectionalParticles = (link: Link) => {
     const settings = this.forceGraph.view.settingManager.getCurrentSetting();
     if (!settings.display.showLinkParticles) return 0;
     if (!this.isHighlightedLink(link)) return 0;
-    if (settings.display.linkStyle === "threads") return 10;
-    return PARTICLE_FREQUECY;
+    return 10;
   };
 
-  getLinkDirectionalParticleWidth = (link: Link) => {
-    const setting = this.forceGraph.view.settingManager.getCurrentSetting();
-    if (setting.display.linkStyle === "threads" && this.isHighlightedLink(link)) return 2.5;
-    return setting.display.linkThickness * LINK_PARTICLE_MULTIPLIER;
-  };
+  getLinkDirectionalParticleWidth = () => 2.5;
 
   getLinkDirectionalParticleSpeed = (link: Link) => {
-    const settings = this.forceGraph.view.settingManager.getCurrentSetting();
-    // Slow drift in threads mode → particles overlap more, look like continuous glow
-    if (settings.display.linkStyle === "threads" && this.isHighlightedLink(link)) return 0.004;
-    return 0.01;
+    return this.isHighlightedLink(link) ? 0.004 : 0.01;
   };
 
   getLinkDirectionalParticleColor = (link: Link) => {
     const settings = this.forceGraph.view.settingManager.getCurrentSetting();
-    if (settings.display.linkStyle === "threads") {
-      if (this.isAuroraLink(link))
-        return hexToRGBA(settings.display.auroraColor1 ?? "#00e8a0", 0.95);
-      return hexToRGBA(settings.display.nodeHoverNeighbourColor ?? "#00ff00", 0.8);
-    }
-    return undefined;
+    if (this.isAuroraLink(link))
+      return hexToRGBA(settings.display.auroraColor1 ?? "#00e8a0", 0.95);
+    return hexToRGBA(settings.display.nodeHoverNeighbourColor ?? "#00ff00", 0.8);
   };
 
   onLinkHover = (link: Link | null) => {
@@ -359,16 +409,6 @@ export class ForceGraphEngine {
     return easedValue;
   };
 
-  getLinkDirectionalArrowLength = () => {
-    const settings = this.forceGraph.view.settingManager.getCurrentSetting();
-    if (settings.display.linkStyle === "threads") return 0;
-    return (
-      settings.display.linkThickness *
-      LINK_ARROW_WIDTH_MULTIPLIER *
-      (settings.display.showLinkArrow ? 1 : 0)
-    );
-  };
-
   private isHighlightedLink = (link: Link): boolean => {
     return this.highlightedLinks.has(link);
   };
@@ -380,6 +420,8 @@ export class ForceGraphEngine {
   };
 
   public isAuroraLink = (link: Link): boolean => {
+    const settings = this.forceGraph.view.settingManager.getCurrentSetting();
+    if (!settings.display.auroraEnabled) return false;
     const watcher = this.forceGraph.view.plugin.stelliumWatcher;
     if (!watcher) return false;
     return watcher.auroraNodes.has(link.source.path) && watcher.auroraNodes.has(link.target.path);
@@ -548,6 +590,61 @@ export class ForceGraphEngine {
     );
   };
 
+  /**
+   * Constellation view ("vista cenital de pirámide"):
+   *  - clicked node = pyramid apex
+   *  - neighbours = pyramid base
+   *  - axis = (apex - base_centroid)
+   * Camera is placed past the apex along this axis, looking back at the apex.
+   * Result: apex is centred, neighbours fan out radially behind it.
+   */
+  public focusOnConstellation = (node: Node & Coords, duration = 1500) => {
+    const camera = this.forceGraph.instance.camera() as THREE.PerspectiveCamera;
+
+    // Compute neighbour centroid + max distance (constellation radius)
+    let cx = 0, cy = 0, cz = 0, count = 0;
+    let radius = 60;
+    for (const nb of node.neighbors ?? []) {
+      const c = nb as unknown as Partial<Coords>;
+      if (typeof c.x === "number" && typeof c.y === "number" && typeof c.z === "number") {
+        cx += c.x; cy += c.y; cz += c.z; count++;
+        const d = Math.hypot(c.x - node.x, c.y - node.y, c.z - node.z);
+        if (d > radius) radius = d;
+      }
+    }
+
+    // Pyramid axis: from base centroid toward apex (clicked node)
+    let viewDir: THREE.Vector3;
+    if (count > 0) {
+      cx /= count; cy /= count; cz /= count;
+      viewDir = new THREE.Vector3(node.x - cx, node.y - cy, node.z - cz);
+      // Degenerate case: apex coincides with centroid → fall back to current camera dir
+      if (viewDir.lengthSq() < 1e-6) {
+        camera.getWorldDirection(viewDir);
+        viewDir.negate(); // we want camera-to-apex direction (opposite of view)
+      }
+      viewDir.normalize();
+    } else {
+      // No neighbours → keep current orientation
+      viewDir = new THREE.Vector3();
+      camera.getWorldDirection(viewDir);
+      viewDir.negate();
+    }
+
+    // Camera distance to fit constellation radius in FOV (with padding)
+    const fovRad = (camera.fov * Math.PI) / 180;
+    const camDistance = (radius * 1.6) / Math.tan(fovRad / 2);
+
+    // Place camera past the apex along the pyramid axis, looking at the apex
+    const newPos = {
+      x: node.x + viewDir.x * camDistance,
+      y: node.y + viewDir.y * camDistance,
+      z: node.z + viewDir.z * camDistance,
+    };
+
+    this.cameraPosition(newPos, { x: node.x, y: node.y, z: node.z }, duration);
+  };
+
   public isHighlightedNode = (node: Node): boolean => {
     return this.highlightedNodes.has(node.id);
   };
@@ -558,7 +655,7 @@ export class ForceGraphEngine {
     const theme = this.forceGraph.view.theme;
     const searchResult = this.forceGraph.view.settingManager.searchResult;
     if (this.selectedNodes.has(node)) {
-      color = selectedColor;
+      color = settings.display.selectedNodeColor ?? "#ffd700";
     } else if (this.isHighlightedNode(node)) {
       color =
         node === this.hoveredNode
@@ -590,6 +687,7 @@ export class ForceGraphEngine {
 
   public removeSelection() {
     this.selectedNodes.clear();
+    this.rebuildHighlights();
     this.updateColor();
   }
 

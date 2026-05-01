@@ -12,13 +12,20 @@ import {
   distanceFromFocal,
   labelCullDistance,
   linkDistance,
-  linkThickness,
   nodeRepulsion,
   nodeSize,
   threadOpacity,
+  traceDurationMs,
+  sparkSize,
   starSizeMultiplier,
   auroraSizeMultiplier,
   auroraIntensity,
+  auroraIntensityFocused,
+  fogFar,
+  bloomStrength,
+  bloomThreshold,
+  dofFocusZone,
+  dofMaxBlur,
 } from "@/SettingsSchemas";
 import type { BaseGraphSettingManager } from "@/views/settings/graphSettingManagers/GraphSettingsManager";
 import type { State } from "@/util/State";
@@ -41,21 +48,6 @@ export const DisplaySettingsView = (
     (value) => {
       settingManager.updateCurrentSettings((setting) => {
         setting.value.display.nodeSize = value;
-      });
-    }
-  );
-
-  // add link thinkness setting
-  addSimpleSliderSetting(
-    containerEl,
-    {
-      name: "Link thickness",
-      value: displaySettings.linkThickness,
-      stepOptions: linkThickness,
-    },
-    (value) => {
-      settingManager.updateCurrentSettings((setting) => {
-        setting.value.display.linkThickness = value;
       });
     }
   );
@@ -158,16 +150,15 @@ export const DisplaySettingsView = (
     }
   );
 
-  // add link hover color setting
   addColorPickerSetting(
     containerEl,
     {
-      name: "Link hover color",
-      value: displaySettings.linkHoverColor,
+      name: "Selected node color",
+      value: displaySettings.selectedNodeColor ?? "#ffd700",
     },
     (value) => {
       settingManager.updateCurrentSettings((setting) => {
-        setting.value.display.linkHoverColor = value;
+        setting.value.display.selectedNodeColor = value;
       });
     }
   );
@@ -209,19 +200,6 @@ export const DisplaySettingsView = (
     (value) => {
       settingManager.updateCurrentSettings((setting) => {
         setting.value.display.showCenterCoordinates = value;
-      });
-    }
-  );
-
-  addToggle(
-    containerEl,
-    {
-      name: "Show link arrow",
-      value: displaySettings.showLinkArrow,
-    },
-    (value) => {
-      settingManager.updateCurrentSettings((setting) => {
-        setting.value.display.showLinkArrow = value;
       });
     }
   );
@@ -356,28 +334,40 @@ export const DisplaySettingsView = (
     }
   );
 
-  // Link style
-  new Setting(containerEl)
-    .setName("Link style")
-    .setDesc("Threads: thin white filaments inspired by constellations.")
-    .addDropdown((dd) =>
-      dd
-        .addOption("default", "Default")
-        .addOption("threads", "Threads (white filaments)")
-        .setValue(displaySettings.linkStyle ?? "default")
-        .onChange((value) => {
-          settingManager.updateCurrentSettings((setting) => {
-            setting.value.display.linkStyle = value as "default" | "threads";
-          });
-        })
-    );
-
   addSimpleSliderSetting(
     containerEl,
     { name: "Thread opacity", value: displaySettings.threadOpacity ?? 0.22, stepOptions: threadOpacity },
     (value) => {
       settingManager.updateCurrentSettings((setting) => {
         setting.value.display.threadOpacity = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    {
+      name: "Trace duration (ms)",
+      value: displaySettings.traceDurationMs ?? 500,
+      stepOptions: traceDurationMs,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.traceDurationMs = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    {
+      name: "Spark size",
+      value: displaySettings.sparkSize ?? 1.0,
+      stepOptions: sparkSize,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.sparkSize = value;
       });
     }
   );
@@ -457,6 +447,148 @@ export const DisplaySettingsView = (
     (value) => {
       settingManager.updateCurrentSettings((setting) => {
         setting.value.display.auroraIntensity = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    {
+      name: "Aurora intensity (when focusing)",
+      value: displaySettings.auroraIntensityFocused ?? 0.15,
+      stepOptions: auroraIntensityFocused,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.auroraIntensityFocused = value;
+      });
+    }
+  );
+
+  addToggle(
+    containerEl,
+    {
+      name: "Aurora halo",
+      description: "Outer corona around aurora stars. Off = cleaner look (only inner glow stays).",
+      value: displaySettings.auroraHaloEnabled ?? false,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.auroraHaloEnabled = value;
+      });
+    }
+  );
+
+  // ── Visual effects ──────────────────────────────────────────────────────────
+  new Setting(containerEl).setName("✦ Effects").setHeading();
+
+  addToggle(
+    containerEl,
+    {
+      name: "Fog",
+      description: "Distant stars fade into the background. Free.",
+      value: displaySettings.fogEnabled ?? true,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.fogEnabled = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    {
+      name: "Fog distance",
+      value: displaySettings.fogFar ?? 1500,
+      stepOptions: fogFar,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.fogFar = value;
+      });
+    }
+  );
+
+  addToggle(
+    containerEl,
+    {
+      name: "Bloom (glow on bright stars)",
+      description: "Real glow around aurora cores. Costs ~3-5ms/frame on integrated GPUs.",
+      value: displaySettings.bloomEnabled ?? true,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.bloomEnabled = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    { name: "Bloom strength", value: displaySettings.bloomStrength ?? 0.6, stepOptions: bloomStrength },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.bloomStrength = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    {
+      name: "Bloom threshold",
+      description: "Higher = only the brightest pixels glow.",
+      value: displaySettings.bloomThreshold ?? 0.7,
+      stepOptions: bloomThreshold,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.bloomThreshold = value;
+      });
+    }
+  );
+
+  addToggle(
+    containerEl,
+    {
+      name: "Depth of field",
+      description: "Blurs distant stars cinematically. Costs +5-10ms/frame.",
+      value: displaySettings.dofEnabled ?? false,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.dofEnabled = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    {
+      name: "DoF sharp padding",
+      description: "Extra world-units of clarity past the closest visible star. The sharp sphere is sized as (distance to nearest star) + this value, so something always stays in focus. Blur ramps to its maximum over this same distance again.",
+      value: displaySettings.dofFocusZone ?? 500,
+      stepOptions: dofFocusZone,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.dofFocusZone = value;
+      });
+    }
+  );
+
+  addSimpleSliderSetting(
+    containerEl,
+    {
+      name: "DoF max blur",
+      description: "Strongest blur applied past the focus radius (fraction of screen size). 0.01 ≈ subtle, 0.03 = heavy haze.",
+      value: displaySettings.dofMaxBlur ?? 0.01,
+      stepOptions: dofMaxBlur,
+    },
+    (value) => {
+      settingManager.updateCurrentSettings((setting) => {
+        setting.value.display.dofMaxBlur = value;
       });
     }
   );

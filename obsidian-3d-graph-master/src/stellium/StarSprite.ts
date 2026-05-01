@@ -24,6 +24,7 @@ export interface StelliiumColors {
   auroraColor3: string;
   auroraSizeMultiplier: number;
   auroraIntensity: number;
+  haloEnabled?: boolean;
 }
 
 export const DEFAULT_STELLIUM_COLORS: StelliiumColors = {
@@ -59,18 +60,20 @@ function drawStarCanvas(
     const c3 = hexToRgb(colors.auroraColor3);
     const k  = colors.auroraIntensity;
 
-    // Outer corona — diffuse, fills the enlarged sprite
-    const coronaPulse = 0.7 + 0.3 * Math.sin(t * 0.5);
-    const corona = ctx.createRadialGradient(cx, cy, r * 0.35, cx, cy, r);
-    corona.addColorStop(0.00, `rgba(0,0,0,0)`);
-    corona.addColorStop(0.45, `rgba(${c3.r},${c3.g},${c3.b},${(0.30 * k * coronaPulse).toFixed(3)})`);
-    corona.addColorStop(0.72, `rgba(${c2.r},${c2.g},${c2.b},${(0.22 * k * coronaPulse).toFixed(3)})`);
-    corona.addColorStop(0.90, `rgba(${c1.r},${c1.g},${c1.b},${(0.10 * k).toFixed(3)})`);
-    corona.addColorStop(1.00, `rgba(0,0,0,0)`);
-    ctx.fillStyle = corona;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fill();
+    if (colors.haloEnabled) {
+      // Outer corona — diffuse, fills the enlarged sprite
+      const coronaPulse = 0.7 + 0.3 * Math.sin(t * 0.5);
+      const corona = ctx.createRadialGradient(cx, cy, r * 0.35, cx, cy, r);
+      corona.addColorStop(0.00, `rgba(0,0,0,0)`);
+      corona.addColorStop(0.45, `rgba(${c3.r},${c3.g},${c3.b},${(0.30 * k * coronaPulse).toFixed(3)})`);
+      corona.addColorStop(0.72, `rgba(${c2.r},${c2.g},${c2.b},${(0.22 * k * coronaPulse).toFixed(3)})`);
+      corona.addColorStop(0.90, `rgba(${c1.r},${c1.g},${c1.b},${(0.10 * k).toFixed(3)})`);
+      corona.addColorStop(1.00, `rgba(0,0,0,0)`);
+      ctx.fillStyle = corona;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // Inner glow — tighter, brighter
     const innerPulse = 0.75 + 0.25 * Math.sin(t * 1.1 + 1);
@@ -101,7 +104,15 @@ function drawStarCanvas(
 
 export interface StarSpriteHandle {
   sprite: THREE.Sprite;
-  update(isAurora: boolean, colors: StelliiumColors, hovered?: boolean, hoverColor?: string, skipDraw?: boolean): void;
+  update(
+    isAurora: boolean,
+    colors: StelliiumColors,
+    hovered?: boolean,
+    hoverColor?: string,
+    skipDraw?: boolean,
+    dimFactor?: number,
+    pulseFactor?: number,
+  ): void;
   dispose(): void;
 }
 
@@ -124,6 +135,7 @@ export function createStarSprite(
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     transparent: true,
+    fog: true,
   });
   const sprite = new THREE.Sprite(material);
 
@@ -132,7 +144,7 @@ export function createStarSprite(
 
   const handle: StarSpriteHandle = {
     sprite,
-    update(aurora: boolean, c: StelliiumColors, hovered = false, hoverColor = "#ff6633", skipDraw = false) {
+    update(aurora: boolean, c: StelliiumColors, hovered = false, hoverColor = "#ff6633", skipDraw = false, dimFactor = 1, pulseFactor = 1) {
       const t = Date.now() * 0.0018 + phase;
       const nodeScale = Math.max(6, Math.log2(degree + 2) * 5) * c.sizeMultiplier;
 
@@ -142,12 +154,12 @@ export function createStarSprite(
           texture.needsUpdate = true;
         }
         const pulse = 1.0 + 0.20 * Math.sin(t * 0.75);
-        const s = nodeScale * c.auroraSizeMultiplier * pulse * (hovered ? 1.25 : 1);
+        const s = nodeScale * c.auroraSizeMultiplier * pulse * (hovered ? 1.25 : 1) * pulseFactor;
         sprite.scale.set(s, s, 1);
-        material.opacity = 0.72 + 0.28 * (0.5 + 0.5 * Math.sin(t * 1.1));
+        material.opacity = (0.72 + 0.28 * (0.5 + 0.5 * Math.sin(t * 1.1))) * dimFactor;
       } else {
-        material.opacity = 0.85 + 0.15 * Math.sin(t * 1.7);
-        const s = nodeScale * (hovered ? 1.35 : 1);
+        material.opacity = (0.85 + 0.15 * Math.sin(t * 1.7)) * dimFactor;
+        const s = nodeScale * (hovered ? 1.35 : 1) * pulseFactor;
         sprite.scale.set(s, s, 1);
       }
 

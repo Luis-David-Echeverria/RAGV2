@@ -8,16 +8,17 @@ export const nodeSize = {
 };
 
 export const threadOpacity    = { min: 0.03, max: 0.6,  step: 0.01, default: 0.22 };
+export const traceDurationMs  = { min: 100, max: 3000, step: 50, default: 500 };
+export const sparkSize        = { min: 0.5, max: 3.0,  step: 0.1, default: 1.0 };
 export const starSizeMultiplier = { min: 0.3, max: 2.5, step: 0.1, default: 1.0 };
 export const auroraSizeMultiplier = { min: 1.0, max: 3.5, step: 0.1, default: 1.4 };
 export const auroraIntensity = { min: 0.1, max: 1.0, step: 0.05, default: 0.6 };
-
-export const linkThickness = {
-  min: 1,
-  max: 3,
-  step: 0.1,
-  default: 2, // 3
-};
+export const auroraIntensityFocused = { min: 0.0, max: 0.6, step: 0.05, default: 0.15 };
+export const fogFar = { min: 200, max: 3000, step: 100, default: 1500 };
+export const bloomStrength = { min: 0.0, max: 2.0, step: 0.05, default: 0.6 };
+export const bloomThreshold = { min: 0.0, max: 1.0, step: 0.05, default: 0.7 };
+export const dofFocusZone = { min: 50, max: 3000, step: 25, default: 500 };
+export const dofMaxBlur = { min: 0.001, max: 0.05, step: 0.001, default: 0.01 };
 
 export const linkDistance = {
   min: 10,
@@ -87,7 +88,6 @@ export enum CommandClickNodeAction {
 const commonSetting = {
   display: {
     nodeSize: nodeSize.default,
-    linkThickness: linkThickness.default,
     linkDistance: linkDistance.default,
     nodeRepulsion: nodeRepulsion.default,
     distanceFromFocal: 300,
@@ -97,16 +97,14 @@ const commonSetting = {
     nodeHoverColor: "#ff0000",
     // node hover neighbour color is green
     nodeHoverNeighbourColor: "#00ff00",
-    // link hover color is blue
-    linkHoverColor: "#0000ff",
     showExtension: false,
     showFullPath: false,
     showCenterCoordinates: true,
-    showLinkArrow: true,
     dontMoveWhenDrag: false,
     stelliumMode: false,
-    linkStyle: "default" as const,
     threadOpacity: 0.22,
+    traceDurationMs: 500,
+    sparkSize: 1.0,
     showLinkParticles: true,
     auroraEnabled: true,
     backgroundColor: "#000000",
@@ -118,6 +116,17 @@ const commonSetting = {
     auroraColor3: "#00c8d0",
     auroraSizeMultiplier: 1.4,
     auroraIntensity: 0.6,
+    auroraIntensityFocused: 0.15,
+    auroraHaloEnabled: false,
+    selectedNodeColor: "#ffd700",
+    fogEnabled: true,
+    fogFar: 1500,
+    bloomEnabled: true,
+    bloomStrength: 0.6,
+    bloomThreshold: 0.7,
+    dofEnabled: false,
+    dofFocusZone: 500,
+    dofMaxBlur: 0.01,
   },
 };
 
@@ -125,7 +134,6 @@ const commonSetting = {
 
 export const BaseDisplaySettingsSchema = z.object({
   nodeSize: z.number().default(commonSetting.display.nodeSize),
-  linkThickness: z.number().default(commonSetting.display.linkThickness),
   linkDistance: z.number().default(commonSetting.display.linkDistance),
   nodeRepulsion: z.number().default(commonSetting.display.nodeRepulsion),
   distanceFromFocal: z.number().default(commonSetting.display.distanceFromFocal),
@@ -133,17 +141,16 @@ export const BaseDisplaySettingsSchema = z.object({
   devMode: z.boolean().default(false),
   nodeHoverColor: z.string().default(commonSetting.display.nodeHoverColor),
   nodeHoverNeighbourColor: z.string().default(commonSetting.display.nodeHoverNeighbourColor),
-  linkHoverColor: z.string().default(commonSetting.display.linkHoverColor),
   showExtension: z.boolean().default(commonSetting.display.showExtension),
   showFullPath: z.boolean().default(commonSetting.display.showFullPath),
   showCenterCoordinates: z.boolean().default(commonSetting.display.showCenterCoordinates),
-  showLinkArrow: z.boolean().default(commonSetting.display.showLinkArrow),
   dontMoveWhenDrag: z.boolean().default(commonSetting.display.dontMoveWhenDrag),
   dagOrientation: z.undefined().or(z.nativeEnum(DagOrientation)).default(DagOrientation.null),
   // ── Stellium visual settings ────────────────────────────────────────────────
   stelliumMode: z.boolean().default(false),
-  linkStyle: z.enum(["default", "threads"]).default("default"),
   threadOpacity: z.number().default(0.22),
+  traceDurationMs: z.number().default(500),
+  sparkSize: z.number().default(1.0),
   showLinkParticles: z.boolean().default(true),
   auroraEnabled: z.boolean().default(true),
   backgroundColor: z.string().default("#000000"),
@@ -155,6 +162,17 @@ export const BaseDisplaySettingsSchema = z.object({
   auroraColor3: z.string().default("#00c8d0"),
   auroraSizeMultiplier: z.number().default(1.8),
   auroraIntensity: z.number().default(0.6),
+  auroraIntensityFocused: z.number().default(0.15),
+  auroraHaloEnabled: z.boolean().default(false),
+  selectedNodeColor: z.string().default("#ffd700"),
+  fogEnabled: z.boolean().default(true),
+  fogFar: z.number().default(1500),
+  bloomEnabled: z.boolean().default(true),
+  bloomStrength: z.number().default(0.6),
+  bloomThreshold: z.number().default(0.7),
+  dofEnabled: z.boolean().default(false),
+  dofFocusZone: z.number().default(500),
+  dofMaxBlur: z.number().default(0.01),
 });
 
 export const LocalDisplaySettingsSchema = z.object({

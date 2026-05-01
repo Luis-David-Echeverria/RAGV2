@@ -4,12 +4,15 @@ import { Graph } from "@/graph/Graph";
 import { CenterCoordinates } from "@/views/graph/CenterCoordinates";
 import * as THREE from "three";
 import * as d3 from "d3-force-3d";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { CinematicDoFPass } from "@/stellium/CinematicDoFPass";
 import { hexToRGBA } from "@/util/hexToRGBA";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import { FOCAL_FROM_CAMERA, ForceGraphEngine } from "@/views/graph/ForceGraphEngine";
 import type { DeepPartial } from "ts-essentials";
 import type { Node } from "@/graph/Node";
 import { createStarSprite, type StarSpriteHandle } from "@/stellium/StarSprite";
+import { SparkPool } from "@/stellium/SparkPool";
 
 import { rgba } from "polished";
 import { createNotice } from "@/util/createNotice";
@@ -53,6 +56,9 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
   // stellium: live map of node path → star sprite handle for animation & disposal
   public readonly starSprites = new Map<string, StarSpriteHandle>();
 
+  // Spark trail pool — emitted at the leading tip of every active link trace
+  public readonly sparkPool: SparkPool = new SparkPool("#ffffff");
+
   // frustum culling — shared across all label onAfterRender callbacks, updated once per frame
   private _frustum = new THREE.Frustum();
   private _projScreenMatrix = new THREE.Matrix4();
@@ -74,6 +80,19 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
 
   // Global frame counter (never resets — used for frame-skip logic)
   private _globalFrame = 0;
+
+  // Aurora quick-toggle button
+  private _auroraButton: HTMLDivElement | null = null;
+  private _lastAuroraState: boolean | null = null;
+
+  // Postprocessing passes
+  private _bloomPass: UnrealBloomPass | null = null;
+  private _dofPass: CinematicDoFPass | null = null;
+  private _lastFogColor: string | null = null;
+
+  // DoF: amortise the O(N) nearest-node scan over time (~15 Hz refresh)
+  private _nearestNodeDist = 0;
+  private _nearestNodeAt = 0;
 
   /**
    *
@@ -137,11 +156,9 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
       .linkDirectionalParticleWidth(this.interactionManager.getLinkDirectionalParticleWidth)
       .linkDirectionalParticleSpeed(this.interactionManager.getLinkDirectionalParticleSpeed)
       .linkDirectionalParticleColor(this.interactionManager.getLinkDirectionalParticleColor)
-      .linkDirectionalArrowLength(this.interactionManager.getLinkDirectionalArrowLength)
-      .linkDirectionalArrowRelPos(1)
       // ── Trace animation: animated line overlay on threads-mode links ──────────
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .linkThreeObject((_link: any) => {
+      .linkThreeObject((link: any) => {
         const TRACE_SEGS = 32;
         const geo = new THREE.BufferGeometry();
         const positions = new Float32Array((TRACE_SEGS + 1) * 3);
@@ -153,24 +170,23 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
           blending: THREE.AdditiveBlending,
           depthWrite: false,
         });
-        return new THREE.Line(geo, mat);
+        const line = new THREE.Line(geo, mat);
+        // Tag the line on the link so the per-render-frame hook can drive
+        // its animation state independently of d3's simulation tick.
+        link.__traceLine = line;
+        return line;
       })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .linkPositionUpdate((obj: any, coords: any, link: any) => {
+      .linkPositionUpdate((obj: any, coords: any, _link: any) => {
+        // Only refresh the line buffer to follow source/target node movement.
+        // The trace state machine (highlight ramp / aurora phase / decay /
+        // sparks / arrival) lives in scene().onBeforeRender so it keeps
+        // running after the d3 simulation cools down.
         const TRACE_SEGS = 32;
-        const settings = this.view.settingManager.getCurrentSetting();
         const line = obj as THREE.Line;
-
-        if (settings.display.linkStyle !== "threads") {
-          line.visible = false;
-          return false;
-        }
-
         line.visible = true;
-        const geo = line.geometry;
-        const posAttr = geo.getAttribute("position") as THREE.BufferAttribute;
+        const posAttr = line.geometry.getAttribute("position") as THREE.BufferAttribute;
         const { start, end } = coords;
-
         for (let i = 0; i <= TRACE_SEGS; i++) {
           const t = i / TRACE_SEGS;
           posAttr.setXYZ(
@@ -181,42 +197,6 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
           );
         }
         posAttr.needsUpdate = true;
-
-        const mat = line.material as THREE.LineBasicMaterial;
-        const isHighlighted = this.interactionManager.highlightedLinks.has(link);
-        const isAurora = this.interactionManager.isAuroraLink(link);
-
-        if (isAurora) {
-          const phase = (((link.__tracePhase as number) ?? Math.random()) + 0.018) % 1;
-          link.__tracePhase = phase;
-          const segCount = Math.floor(0.45 * (TRACE_SEGS + 1));
-          const segStart = Math.min(
-            Math.floor(phase * (TRACE_SEGS + 1)),
-            TRACE_SEGS + 1 - segCount
-          );
-          geo.setDrawRange(segStart, segCount);
-          mat.color.set(settings.display.auroraColor1 ?? "#00e8a0");
-          mat.opacity = Math.max(0.35, settings.display.auroraIntensity ?? 0.6);
-        } else if (isHighlighted) {
-          let p: number = (link.__traceP as number) ?? 0;
-          p = Math.min(p + 0.1, 1);
-          link.__traceP = p;
-          geo.setDrawRange(0, Math.ceil(p * (TRACE_SEGS + 1)));
-          mat.color.set(0xffffff);
-          mat.opacity = 0.9;
-        } else {
-          let p: number = (link.__traceP as number) ?? 0;
-          p = Math.max(p - 0.15, 0);
-          link.__traceP = p;
-          if (p <= 0) {
-            geo.setDrawRange(0, 0);
-            mat.opacity = 0;
-          } else {
-            geo.setDrawRange(0, Math.ceil(p * (TRACE_SEGS + 1)));
-            mat.opacity = 0.9 * p;
-          }
-        }
-
         return true;
       })
       .linkThreeObjectExtend(true)
@@ -242,6 +222,15 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
     this.myCube = this.createCube();
     scene.add(this.myCube);
 
+    // Spark trail pool — drives the dispersing tip on active link traces
+    scene.add(this.sparkPool.object);
+
+    // A7: fog setup
+    this._setupFog(scene);
+
+    // A1 + A5: postprocessing passes (bloom, DoF)
+    this._setupPostprocessing();
+
     // P3: build instanced mesh before nodeThreeObject runs (non-stellium mode only)
     const initSettings = this.view.settingManager.getCurrentSetting();
     if (!initSettings.display.stelliumMode) {
@@ -252,6 +241,9 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
     if (initSettings.display.devMode) {
       this._createDevOverlay();
     }
+
+    // Aurora quick-toggle button (always visible)
+    this._createAuroraButton();
 
     // add node label + optional star sprite
     this.instance
@@ -291,6 +283,24 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
           const obj = node.__threeObj as THREE.Object3D | undefined;
           const pos = obj?.position;
 
+          // Priority: when focus is active (hover or selection), only labels of
+          // focused nodes (the focused node + its neighbors) are visible. This
+          // overrides distance / frustum culling so the user always sees what
+          // they're investigating.
+          const focusActive = this.interactionManager.getIsAnyHighlighted();
+          if (focusActive) {
+            if (!this.interactionManager.isHighlightedNode(node)) {
+              this._devLabelCulled++;
+              this._devLabelTotal++;
+              nodeEl.style.display = "none";
+              return;
+            }
+            this._devLabelTotal++;
+            nodeEl.style.display = "";
+            nodeEl.style.opacity = "1";
+            return;
+          }
+
           if (pos) {
             const cullDist =
               this.view.settingManager.getCurrentSetting().display.labelCullDistance ?? 800;
@@ -303,14 +313,7 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
           }
 
           nodeEl.style.display = "";
-          const value = 1 - this.interactionManager.getNodeOpacityEasedValue(node);
-          const opacity =
-            this.interactionManager.getIsAnyHighlighted() &&
-            !this.interactionManager.isHighlightedNode(node)
-              ? Math.clamp(value, 0, 0.2)
-              : this.interactionManager.hoveredNode === node
-              ? 1
-              : value;
+          const opacity = 1 - this.interactionManager.getNodeOpacityEasedValue(node);
 
           // opacity near-zero → remove from DOM paint pipeline entirely
           if (opacity < 0.01) {
@@ -440,6 +443,19 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
         this._updateInstancedMesh();
       }
 
+      // Sync aurora button label if the underlying setting changed
+      this._syncAuroraButton();
+
+      // Sync postprocessing passes + fog with current settings
+      this._syncEffects();
+
+      // ── Trace animation state (decoupled from d3 simulation tick) ─────────────
+      // This block runs every render frame regardless of whether the force
+      // simulation is still ticking. It owns: highlighted-trace ramp, aurora
+      // phase oscillator, decay back to 0, spark spawning, and the
+      // "trace arrived" callback that drives reveal-gating + the focus pulse.
+      this._tickTraces();
+
       // stellium: animate star sprites every frame (with frame-skip + distance LOD)
       if (this.starSprites.size > 0) {
         this._globalFrame++;
@@ -453,35 +469,66 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
           auroraColor3: d.auroraColor3 ?? "#00c8d0",
           auroraSizeMultiplier: d.auroraSizeMultiplier ?? 1.8,
           auroraIntensity: d.auroraIntensity ?? 0.6,
+          haloEnabled: d.auroraHaloEnabled ?? false,
         };
+        const dimmedColors = { ...colors, auroraIntensity: d.auroraIntensityFocused ?? 0.15 };
         const directColor   = d.nodeHoverColor ?? "#ff6633";
         const neighborColor = d.nodeHoverNeighbourColor ?? "#00ff00";
         const cullDist = d.labelCullDistance ?? 800;
         const camPos = (camera as THREE.PerspectiveCamera).position;
+        const focusActive = this.interactionManager.getIsAnyHighlighted();
         // skip aurora canvas redraw on odd frames (keeps animation smooth, halves GPU uploads)
         const skipDraw = this._globalFrame % 2 === 1;
+
+        const PULSE_DURATION = 280;
+        const nowMs = performance.now();
+        // Drop expired pulse triggers so the map doesn't grow unbounded
+        this.interactionManager.pulseTriggers.forEach((startedAt, id) => {
+          if (nowMs - startedAt > PULSE_DURATION) {
+            this.interactionManager.pulseTriggers.delete(id);
+          }
+        });
 
         this.starSprites.forEach((handle, path) => {
           const node = this.instance.graphData().getNodeByPath(path);
           if (!node) return;
 
-          // LOD: hide sprites beyond cull distance and skip all updates
+          const isDirect   = this.interactionManager.hoveredNode === node;
+          const isInFocus  = focusActive && this.interactionManager.isHighlightedNode(node);
+
+          // LOD: hide sprites beyond cull distance — but never hide focused stars
           const dist = camPos.distanceTo(handle.sprite.position);
-          if (dist > cullDist) {
+          if (dist > cullDist && !isInFocus) {
             handle.sprite.visible = false;
             return;
           }
           handle.sprite.visible = true;
 
-          const isDirect   = this.interactionManager.hoveredNode === node;
-          const isNeighbor = !isDirect && this.interactionManager.isHighlightedNode(node);
+          const isNeighbor = isInFocus && !isDirect;
+          // Non-focused stars get dimmed aurora intensity AND a global opacity dim
+          const colorsForThisNode = focusActive && !isInFocus ? dimmedColors : colors;
+          const dimFactor = focusActive && !isInFocus ? 0.25 : 1;
+
+          // Arrival pulse: temporary scale spike when an incoming trace lands
+          let pulseFactor = 1;
+          const pulseStart = this.interactionManager.pulseTriggers.get(node.id);
+          if (pulseStart !== undefined) {
+            const k = (nowMs - pulseStart) / PULSE_DURATION;
+            if (k >= 0 && k <= 1) {
+              const env = (1 - k) * (1 - k);
+              pulseFactor = 1 + 0.45 * env;
+            }
+          }
+
           // never skip draw for hovered nodes — their aurora must stay perfectly in sync
           handle.update(
             this.interactionManager.isAuroraNode(node),
-            colors,
+            colorsForThisNode,
             isDirect || isNeighbor,
             isDirect ? directColor : neighborColor,
             skipDraw && !isDirect,
+            dimFactor,
+            pulseFactor,
           );
         });
       }
@@ -499,6 +546,8 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
     (this.myCube.material as THREE.Material).dispose();
     this.starSprites.forEach((handle) => handle.dispose());
     this.starSprites.clear();
+    this.instance.scene().remove(this.sparkPool.object);
+    this.sparkPool.dispose();
     if (this._instancedMesh) {
       this.instance.scene().remove(this._instancedMesh);
       this._instancedMesh.geometry.dispose();
@@ -507,13 +556,248 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
       this._nodeInstanceIndex.clear();
     }
     this._destroyDevOverlay();
+    this._destroyAuroraButton();
+    // Dispose postprocessing passes
+    this._bloomPass?.dispose?.();
+    this._bloomPass = null;
+    this._dofPass?.dispose?.();
+    this._dofPass = null;
+  }
+
+  /**
+   * Per-render-frame trace state machine. Runs even when d3 has cooled, so
+   * hover/select animations always play instead of freezing until the next
+   * simulation reheat. Iterates all links once — O(N), same big-O as the
+   * old per-tick callback, but driven by RAF instead of by d3 ticks.
+   */
+  private _tickTraces() {
+    const settings = this.view.settingManager.getCurrentSetting();
+    const TRACE_SEGS = 32;
+    const focusActive = this.interactionManager.getIsAnyHighlighted();
+    const durationMs = Math.max(50, settings.display.traceDurationMs ?? 500);
+    const inc = (1000 / 60) / durationMs;
+    const auroraColor = settings.display.auroraColor1 ?? "#00e8a0";
+    const auroraIntensity = Math.max(0.35, settings.display.auroraIntensity ?? 0.6);
+
+    // Sync spark uniform once per frame (cheap: one uniform write)
+    this.sparkPool.setSize(settings.display.sparkSize ?? 1.0);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const links = this.instance.graphData().links as any[];
+    for (let li = 0; li < links.length; li++) {
+      const link = links[li];
+      const line = link.__traceLine as THREE.Line | undefined;
+      if (!line) continue;
+      const geo = line.geometry as THREE.BufferGeometry;
+      const mat = line.material as THREE.LineBasicMaterial;
+
+      const isHighlighted = this.interactionManager.highlightedLinks.has(link);
+      const isAurora = this.interactionManager.isAuroraLink(link);
+
+      if (isAurora) {
+        if (focusActive && !isHighlighted) {
+          geo.setDrawRange(0, 0);
+          mat.opacity = 0;
+        } else {
+          const phase = (((link.__tracePhase as number) ?? Math.random()) + 0.018) % 1;
+          link.__tracePhase = phase;
+          const segCount = Math.floor(0.45 * (TRACE_SEGS + 1));
+          const segStart = Math.min(
+            Math.floor(phase * (TRACE_SEGS + 1)),
+            TRACE_SEGS + 1 - segCount
+          );
+          geo.setDrawRange(segStart, segCount);
+          mat.color.set(auroraColor);
+          mat.opacity = auroraIntensity;
+        }
+      } else if (isHighlighted) {
+        const prevP: number = (link.__traceP as number) ?? 0;
+        const p = Math.min(prevP + inc, 1);
+        link.__traceP = p;
+        geo.setDrawRange(0, Math.ceil(p * (TRACE_SEGS + 1)));
+        mat.color.set(0xffffff);
+        mat.opacity = 0.9;
+
+        // Sparks at the leading tip while the trace is drawing
+        if (p < 1 && link.source && link.target) {
+          const sx = link.source.x ?? 0;
+          const sy = link.source.y ?? 0;
+          const sz = link.source.z ?? 0;
+          const ex = link.target.x ?? 0;
+          const ey = link.target.y ?? 0;
+          const ez = link.target.z ?? 0;
+          const tipX = sx + (ex - sx) * p;
+          const tipY = sy + (ey - sy) * p;
+          const tipZ = sz + (ez - sz) * p;
+          for (let s = 0; s < 4; s++) {
+            const vx = (Math.random() - 0.5) * 22;
+            const vy = (Math.random() - 0.5) * 22;
+            const vz = (Math.random() - 0.5) * 22;
+            this.sparkPool.spawn(tipX, tipY, tipZ, vx, vy, vz);
+          }
+        }
+
+        // Trace just crossed 1 → notify engine (reveal destination / pulse focus)
+        if (p >= 1 && prevP < 1 && !link.__traceArrived) {
+          link.__traceArrived = true;
+          this.interactionManager.onTraceArrived(link);
+        }
+      } else {
+        let p: number = (link.__traceP as number) ?? 0;
+        if (p <= 0) {
+          // Already decayed — skip the geometry write to save work
+          if (mat.opacity !== 0) {
+            geo.setDrawRange(0, 0);
+            mat.opacity = 0;
+          }
+          continue;
+        }
+        p = Math.max(p - 0.15, 0);
+        link.__traceP = p;
+        if (p <= 0) {
+          geo.setDrawRange(0, 0);
+          mat.opacity = 0;
+        } else {
+          geo.setDrawRange(0, Math.ceil(p * (TRACE_SEGS + 1)));
+          mat.opacity = 0.9 * p;
+        }
+      }
+    }
+  }
+
+  private _setupFog(scene: THREE.Scene) {
+    const d = this.view.settingManager.getCurrentSetting().display;
+    if (!d.fogEnabled) return;
+    const color = d.backgroundColor ?? "#000000";
+    const far = d.fogFar ?? 1500;
+    scene.fog = new THREE.Fog(color, far / 4, far);
+    this._lastFogColor = color;
+  }
+
+  private _setupPostprocessing() {
+    // 3d-force-graph exposes its EffectComposer via postProcessingComposer()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const composer = (this.instance as any).postProcessingComposer?.();
+    if (!composer) return;
+    const d = this.view.settingManager.getCurrentSetting().display;
+    const w = this.view.contentEl.offsetWidth || 800;
+    const h = this.view.contentEl.offsetHeight || 600;
+
+    // Bloom — half-resolution to keep it cheap on integrated GPUs
+    this._bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(w * 0.5, h * 0.5),
+      d.bloomStrength ?? 0.6,
+      0.5, // radius (kept fixed; threshold + strength are the real knobs)
+      d.bloomThreshold ?? 0.7,
+    );
+    this._bloomPass.enabled = d.bloomEnabled ?? true;
+    composer.addPass(this._bloomPass);
+
+    // Cinematic depth of field — sharp inside `focusRadius` from the camera,
+    // linearly defocused over `falloff` world units beyond that.
+    const camera = this.instance.camera() as THREE.PerspectiveCamera;
+    const initFocusRadius = d.dofFocusZone ?? 500;
+    const initMaxBlur = d.dofMaxBlur ?? 0.01;
+    this._dofPass = new CinematicDoFPass(this.instance.scene(), camera, {
+      focusRadius: initFocusRadius,
+      falloff: initFocusRadius,
+      maxBlur: initMaxBlur,
+    });
+    this._dofPass.enabled = d.dofEnabled ?? false;
+    composer.addPass(this._dofPass);
+  }
+
+  private _syncEffects() {
+    const d = this.view.settingManager.getCurrentSetting().display;
+    const scene = this.instance.scene();
+    const camera = this.instance.camera() as THREE.PerspectiveCamera;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const controls = this.instance.controls() as any;
+    const target =
+      controls?.target instanceof THREE.Vector3 ? controls.target : new THREE.Vector3(0, 0, 0);
+
+    // Distance from camera to its orbit target — defines the "interest scale".
+    // Adaptive fog/DoF use this so behaviour stays sensible at any zoom level.
+    const D = camera.position.distanceTo(target);
+
+    // Fog sync — adaptive
+    if (d.fogEnabled) {
+      const color = d.backgroundColor ?? "#000000";
+      const userFar = d.fogFar ?? 1500;
+      // fog covers a band around D so things "near where the camera is looking" are sharp
+      const far = Math.max(D + userFar, userFar);
+      const near = Math.max(D - userFar * 0.8, 50);
+      if (!scene.fog) {
+        scene.fog = new THREE.Fog(color, near, far);
+      } else if (scene.fog instanceof THREE.Fog) {
+        if (this._lastFogColor !== color) {
+          scene.fog.color.set(color);
+          this._lastFogColor = color;
+        }
+        scene.fog.near = near;
+        scene.fog.far = far;
+      }
+    } else if (scene.fog) {
+      scene.fog = null;
+    }
+
+    // Bloom sync
+    if (this._bloomPass) {
+      this._bloomPass.enabled = d.bloomEnabled ?? true;
+      this._bloomPass.strength = d.bloomStrength ?? 0.6;
+      this._bloomPass.threshold = d.bloomThreshold ?? 0.7;
+    }
+
+    // DoF sync — sphere of clarity centred on the camera. Radius is
+    // dynamic: nearest-node distance + user "padding" — guarantees that the
+    // closest star is always sharp, no matter how the user pans/zooms.
+    if (this._dofPass) {
+      this._dofPass.enabled = d.dofEnabled ?? false;
+      if (this._dofPass.enabled) {
+        const padding = d.dofFocusZone ?? 500;
+        const maxBlur = d.dofMaxBlur ?? 0.01;
+        const nearest = this._computeNearestNodeDistance(camera);
+        const focusRadius = nearest + padding;
+        const u = this._dofPass.uniforms;
+        u.focusRadius.value = focusRadius;
+        u.falloff.value = padding;
+        u.maxBlur.value = maxBlur;
+      }
+    }
+  }
+
+  /**
+   * Distance from the camera to the closest node in world units.
+   * Refreshed at ~15 Hz — fast enough to track pan/zoom without lag, but
+   * keeps the per-frame cost negligible on large graphs.
+   */
+  private _computeNearestNodeDistance(camera: THREE.PerspectiveCamera): number {
+    const now = performance.now();
+    if (now - this._nearestNodeAt < 66 && this._nearestNodeDist > 0) {
+      return this._nearestNodeDist;
+    }
+    const nodes = this.instance.graphData().nodes as (Node & {
+      x?: number; y?: number; z?: number;
+    })[];
+    const cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
+    let minSq = Infinity;
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.x == null || n.y == null || n.z == null) continue;
+      const dx = n.x - cx, dy = n.y - cy, dz = n.z - cz;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < minSq) minSq = d2;
+    }
+    this._nearestNodeDist = isFinite(minSq) ? Math.sqrt(minSq) : 0;
+    this._nearestNodeAt = now;
+    return this._nearestNodeDist;
   }
 
   private _buildInstancedMesh(graph: Graph, scene: THREE.Scene) {
     const count = graph.nodes.length;
     if (count === 0) return;
     const geo = new THREE.SphereGeometry(1, 16, 12);
-    const mat = new THREE.MeshBasicMaterial({ opacity: 0.9, transparent: true });
+    const mat = new THREE.MeshBasicMaterial({ opacity: 0.9, transparent: true, fog: true });
     this._instancedMesh = new THREE.InstancedMesh(geo, mat, count);
     this._instancedMesh.frustumCulled = false;
     graph.nodes.forEach((node, i) => {
@@ -562,6 +846,57 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
   private _destroyDevOverlay() {
     this._devOverlay?.remove();
     this._devOverlay = null;
+  }
+
+  private _createAuroraButton() {
+    if (this._auroraButton) return;
+    const btn = document.createElement("div");
+    btn.style.cssText = [
+      "position:absolute", "top:8px", "right:48px", "z-index:100",
+      "background:rgba(0,0,0,0.65)", "color:#b0c4ff",
+      "font-family:monospace", "font-size:11px",
+      "padding:5px 10px", "border-radius:6px",
+      "border:1px solid rgba(176,196,255,0.25)",
+      "cursor:pointer", "user-select:none",
+      "transition:background 0.15s",
+    ].join(";");
+    btn.addEventListener("mouseenter", () => {
+      btn.style.background = "rgba(0,0,0,0.85)";
+    });
+    btn.addEventListener("mouseleave", () => {
+      btn.style.background = "rgba(0,0,0,0.65)";
+    });
+    btn.addEventListener("click", () => {
+      const settingManager = this.view.settingManager;
+      const cur = settingManager.getCurrentSetting().display.auroraEnabled;
+      settingManager.updateCurrentSettings((s) => {
+        s.value.display.auroraEnabled = !cur;
+      });
+      // refresh cached link colors / particles immediately
+      this.interactionManager.updateColor();
+    });
+    this.view.contentEl.style.position = "relative";
+    this.view.contentEl.appendChild(btn);
+    this._auroraButton = btn;
+    this._syncAuroraButton();
+  }
+
+  private _syncAuroraButton() {
+    if (!this._auroraButton) return;
+    const enabled = this.view.settingManager.getCurrentSetting().display.auroraEnabled;
+    if (enabled === this._lastAuroraState) return;
+    this._lastAuroraState = enabled;
+    this._auroraButton.textContent = enabled ? "✦ Aurora ON" : "✦ Aurora OFF";
+    this._auroraButton.style.color = enabled ? "#00e8a0" : "#666";
+    this._auroraButton.style.borderColor = enabled
+      ? "rgba(0,232,160,0.35)"
+      : "rgba(120,120,120,0.3)";
+  }
+
+  private _destroyAuroraButton() {
+    this._auroraButton?.remove();
+    this._auroraButton = null;
+    this._lastAuroraState = null;
   }
 
   private _updateDevOverlayContent() {
@@ -668,7 +1003,6 @@ export class ForceGraph<V extends Graph3dView<GraphSettingManager<GraphSetting, 
     const needReheat =
       config?.display?.nodeRepulsion !== undefined ||
       config?.display?.linkDistance !== undefined ||
-      config?.display?.linkThickness !== undefined ||
       (config as LocalGraphSettings)?.display?.dagOrientation !== undefined;
 
     if (needReheat) {

@@ -201,13 +201,6 @@ export abstract class Graph3dView<
         },
       });
     }
-    if (path.includes("display.linkThickness")) {
-      this.forceGraph?.updateConfig({
-        display: {
-          linkThickness: newSetting.display.linkThickness,
-        },
-      });
-    }
     if (path.includes("display.nodeRepulsion")) {
       this.forceGraph?.updateConfig({
         display: {

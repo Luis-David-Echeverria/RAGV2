@@ -17,6 +17,11 @@ dependencies = [
     "mcp",
     "fastapi",
     "uvicorn",
+    "PySide6",
+    "qasync",
+    "Pillow",
+    "watchdog",
+    "windows-toasts;sys_platform=='win32'",
 ]
 
 [project.scripts]
